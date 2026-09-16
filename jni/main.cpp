@@ -1,14 +1,69 @@
 #include <jni.h>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <atomic>
+#include <cstdio>
+#include <cerrno>
+#include <sys/prctl.h>
+#include <android/log.h>
 #include "zygisk.hpp"
 #include "dex_bytes.h"
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 
+#define LOG_TAG "SpooferHook"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#endif
+#ifndef PR_SET_VMA_ANON_NAME
+#define PR_SET_VMA_ANON_NAME 0
+#endif
+
 static std::atomic<bool> is_target_app{false};
+
+static void sanitize_executable_maps() {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+
+    char line[512];
+    struct MapRange {
+        uintptr_t start;
+        uintptr_t end;
+    };
+    std::vector<MapRange> targets;
+
+    while (fgets(line, sizeof(line), fp)) {
+        uintptr_t start = 0, end = 0;
+        char perms[5] = {0};
+        int path_offset = 0;
+        if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %n", &start, &end, perms, &path_offset) >= 3) {
+            if (perms[2] == 'x') {
+                std::string path = (path_offset > 0 && path_offset < (int)strlen(line)) ? (line + path_offset) : "";
+                while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' ')) {
+                    path.pop_back();
+                }
+                if (path.find("<fault>") != std::string::npos || path.find("fault") != std::string::npos) {
+                    targets.push_back({start, end});
+                }
+            }
+        }
+    }
+    fclose(fp);
+
+    for (const auto& target : targets) {
+        int ret = prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, target.start, target.end - target.start, "dalvik-jit-code-cache");
+        if (ret != 0) {
+            LOGE("prctl failed for %p-%p: %d (%s)", (void*)target.start, (void*)target.end, errno, strerror(errno));
+        } else {
+            LOGI("Successfully renamed VMA %p-%p", (void*)target.start, (void*)target.end);
+        }
+    }
+}
 
 static void exempt_all_hidden_apis(JNIEnv* env) {
     jclass vm_runtime_cls = env->FindClass("dalvik/system/VMRuntime");
@@ -89,6 +144,7 @@ public:
 
     void postAppSpecialize(const AppSpecializeArgs *args) override {
         if (!is_target_app.load(std::memory_order_relaxed)) return;
+        sanitize_executable_maps();
         install_service_hook(env);
     }
 
