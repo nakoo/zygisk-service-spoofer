@@ -73,10 +73,14 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
+        if (args->is_child_zygote && *args->is_child_zygote) {
+            return;
+        }
+
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
         if (process) {
-            // Match main app and any helper sub-processes
-            if (strncmp(process, "com.eltavine.duckdetector", 25) == 0) {
+            if (strstr(process, "_zygote") == nullptr &&
+                strncmp(process, "com.eltavine.duckdetector", 25) == 0) {
                 is_target_app.store(true, std::memory_order_relaxed);
             }
             env->ReleaseStringUTFChars(args->nice_name, process);

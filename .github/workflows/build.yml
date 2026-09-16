@@ -16,11 +16,6 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Download Zygisk Header
-        run: |
-          mkdir -p jni
-          curl -fSL -o jni/zygisk.hpp https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
-
       - name: Build DEX Header
         run: |
           mkdir -p java_src/com/android/internal/util
