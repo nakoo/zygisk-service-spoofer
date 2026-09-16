@@ -6,7 +6,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -18,7 +18,7 @@ public class ServiceHook implements InvocationHandler {
         this.target = target;
     }
 
-    private static boolean shouldHide(String name) {
+    public static boolean shouldHide(String name) {
         if (name == null) return false;
         String lower = name.toLowerCase(Locale.ROOT);
         if (lower.equals("profile")) return true;
@@ -56,40 +56,84 @@ public class ServiceHook implements InvocationHandler {
         return method.invoke(target, args);
     }
 
+    public static class FilteredCache<K, V> extends HashMap<K, V> {
+        public FilteredCache() {
+            super();
+        }
+
+        private boolean shouldHideKey(Object key) {
+            return key instanceof String && shouldHide((String) key);
+        }
+
+        @Override
+        public V get(Object key) {
+            if (shouldHideKey(key)) return null;
+            return super.get(key);
+        }
+
+        @Override
+        public boolean containsKey(Object key) {
+            if (shouldHideKey(key)) return false;
+            return super.containsKey(key);
+        }
+
+        @Override
+        public V put(K key, V value) {
+            if (shouldHideKey(key)) return null;
+            return super.put(key, value);
+        }
+
+        @Override
+        public void putAll(Map<? extends K, ? extends V> m) {
+            if (m == null) return;
+            for (Map.Entry<? extends K, ? extends V> entry : m.entrySet()) {
+                put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
     public static void install() {
         try {
             Class<?> smClass = Class.forName("android.os.ServiceManager");
             Method getSmMethod = smClass.getDeclaredMethod("getIServiceManager");
             getSmMethod.setAccessible(true);
             Object orig = getSmMethod.invoke(null);
-            if (orig == null) return;
+            if (orig != null) {
+                Class<?> ismClass = Class.forName("android.os.IServiceManager");
+                Object proxy = Proxy.newProxyInstance(
+                    ismClass.getClassLoader(),
+                    new Class<?>[] { ismClass },
+                    new ServiceHook(orig)
+                );
 
-            Class<?> ismClass = Class.forName("android.os.IServiceManager");
-            Object proxy = Proxy.newProxyInstance(
-                ismClass.getClassLoader(),
-                new Class<?>[] { ismClass },
-                new ServiceHook(orig)
-            );
+                Field ssmField = smClass.getDeclaredField("sServiceManager");
+                ssmField.setAccessible(true);
+                ssmField.set(null, proxy);
+            }
 
-            Field ssmField = smClass.getDeclaredField("sServiceManager");
-            ssmField.setAccessible(true);
-            ssmField.set(null, proxy);
-
+            // Install FilteredCache into ServiceManager.sCache to drop preloaded Lineage services
             Field sCacheField = smClass.getDeclaredField("sCache");
             sCacheField.setAccessible(true);
             Object cacheObj = sCacheField.get(null);
+            FilteredCache<String, IBinder> newCache = new FilteredCache<>();
             if (cacheObj instanceof Map) {
-                Map<?, ?> cache = (Map<?, ?>) cacheObj;
-                synchronized (cache) {
-                    Iterator<?> it = cache.keySet().iterator();
-                    while (it.hasNext()) {
-                        Object key = it.next();
-                        if (key instanceof String && shouldHide((String) key)) {
-                            it.remove();
-                        }
+                Map<?, ?> oldMap = (Map<?, ?>) cacheObj;
+                for (Map.Entry<?, ?> entry : oldMap.entrySet()) {
+                    if (entry.getKey() instanceof String && entry.getValue() instanceof IBinder) {
+                        newCache.put((String) entry.getKey(), (IBinder) entry.getValue());
                     }
                 }
             }
+            sCacheField.set(null, newCache);
+        } catch (Throwable ignored) {
+        }
+
+        // Nullify AssetManager.LINEAGE_APK_PATH to clear reflectionScan
+        try {
+            Class<?> amClass = Class.forName("android.content.res.AssetManager");
+            Field field = amClass.getDeclaredField("LINEAGE_APK_PATH");
+            field.setAccessible(true);
+            field.set(null, null);
         } catch (Throwable ignored) {
         }
     }
