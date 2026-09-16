@@ -7,6 +7,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,13 +35,17 @@ public class ServiceHook implements InvocationHandler {
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         String name = method.getName();
-        if ("getService".equals(name) || "checkService".equals(name)) {
-            if (args != null && args.length > 0 && args[0] instanceof String) {
-                if (shouldHide((String) args[0])) {
+
+        // If any parameter is a service name that should be hidden, return null immediately
+        if (args != null) {
+            for (Object arg : args) {
+                if (arg instanceof String && shouldHide((String) arg)) {
                     return null;
                 }
             }
-        } else if ("listServices".equals(name)) {
+        }
+
+        if ("listServices".equals(name)) {
             Object res = method.invoke(target, args);
             if (res instanceof String[]) {
                 String[] list = (String[]) res;
@@ -111,10 +116,25 @@ public class ServiceHook implements InvocationHandler {
                 ssmField.set(null, proxy);
             }
 
-            // Install FilteredCache into ServiceManager.sCache to drop preloaded Lineage services
             Field sCacheField = smClass.getDeclaredField("sCache");
             sCacheField.setAccessible(true);
             Object cacheObj = sCacheField.get(null);
+
+            // 1. Purge existing entries in-place
+            if (cacheObj instanceof Map) {
+                Map<?, ?> oldMap = (Map<?, ?>) cacheObj;
+                synchronized (oldMap) {
+                    Iterator<?> it = oldMap.keySet().iterator();
+                    while (it.hasNext()) {
+                        Object key = it.next();
+                        if (key instanceof String && shouldHide((String) key)) {
+                            it.remove();
+                        }
+                    }
+                }
+            }
+
+            // 2. Overwrite the final static field using Unsafe so any future putAll/initServiceCache drops "profile"
             FilteredCache<String, IBinder> newCache = new FilteredCache<>();
             if (cacheObj instanceof Map) {
                 Map<?, ?> oldMap = (Map<?, ?>) cacheObj;
@@ -124,7 +144,23 @@ public class ServiceHook implements InvocationHandler {
                     }
                 }
             }
-            sCacheField.set(null, newCache);
+
+            try {
+                Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+                Field theUnsafeField = unsafeClass.getDeclaredField("theUnsafe");
+                theUnsafeField.setAccessible(true);
+                Object unsafe = theUnsafeField.get(null);
+
+                Method staticFieldOffsetMethod = unsafeClass.getMethod("staticFieldOffset", Field.class);
+                Method staticFieldBaseMethod = unsafeClass.getMethod("staticFieldBase", Field.class);
+                Method putObjectMethod = unsafeClass.getMethod("putObject", Object.class, long.class, Object.class);
+
+                long offset = ((Number) staticFieldOffsetMethod.invoke(unsafe, sCacheField)).longValue();
+                Object base = staticFieldBaseMethod.invoke(unsafe, sCacheField);
+                putObjectMethod.invoke(unsafe, base, offset, newCache);
+            } catch (Throwable fallback) {
+                sCacheField.set(null, newCache);
+            }
         } catch (Throwable ignored) {
         }
 
