@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cerrno>
+#include <unistd.h>
 #include <sys/prctl.h>
 #include <android/log.h>
 #include "zygisk.hpp"
@@ -28,7 +29,10 @@ static std::atomic<bool> is_target_app{false};
 
 static void sanitize_executable_maps() {
     FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) return;
+    if (!fp) {
+        LOGE("Failed to open /proc/self/maps: %d (%s)", errno, strerror(errno));
+        return;
+    }
 
     char line[512];
     struct MapRange {
@@ -55,12 +59,14 @@ static void sanitize_executable_maps() {
     }
     fclose(fp);
 
+    LOGI("Found %zu target mapping(s) matching 'fault'", targets.size());
+
     for (const auto& target : targets) {
         int ret = prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, target.start, target.end - target.start, "dalvik-jit-code-cache");
         if (ret != 0) {
             LOGE("prctl failed for %p-%p: %d (%s)", (void*)target.start, (void*)target.end, errno, strerror(errno));
         } else {
-            LOGI("Successfully renamed VMA %p-%p", (void*)target.start, (void*)target.end);
+            LOGI("Successfully renamed VMA %p-%p to dalvik-jit-code-cache", (void*)target.start, (void*)target.end);
         }
     }
 }
@@ -112,6 +118,7 @@ static void install_service_hook(JNIEnv* env) {
         jmethodID install_mid = env->GetStaticMethodID(hook_cls, "install", "()V");
         if (install_mid) {
             env->CallStaticVoidMethod(hook_cls, install_mid);
+            LOGI("ServiceHook.install() invoked successfully");
         }
     }
 
@@ -125,24 +132,32 @@ public:
     void onLoad(Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
+        LOGI("onLoad called in pid %d", getpid());
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
+        const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
+        LOGI("preAppSpecialize: nice_name=%s, is_child_zygote=%d",
+             process ? process : "null",
+             (args->is_child_zygote && *args->is_child_zygote) ? 1 : 0);
+
         if (args->is_child_zygote && *args->is_child_zygote) {
+            if (process) env->ReleaseStringUTFChars(args->nice_name, process);
             return;
         }
 
-        const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
         if (process) {
             if (strstr(process, "_zygote") == nullptr &&
                 strncmp(process, "com.eltavine.duckdetector", 25) == 0) {
                 is_target_app.store(true, std::memory_order_relaxed);
+                LOGI("Target app matched: %s", process);
             }
             env->ReleaseStringUTFChars(args->nice_name, process);
         }
     }
 
     void postAppSpecialize(const AppSpecializeArgs *args) override {
+        LOGI("postAppSpecialize: is_target_app=%d", is_target_app.load() ? 1 : 0);
         if (!is_target_app.load(std::memory_order_relaxed)) return;
         sanitize_executable_maps();
         install_service_hook(env);
