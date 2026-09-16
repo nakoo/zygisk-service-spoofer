@@ -6,29 +6,48 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ServiceHook implements InvocationHandler {
     private final Object target;
+
+    private static final String[] HIDDEN_KEYWORDS = {
+        "profile",
+        "lineage",
+        "crdroid",
+        "aospa",
+        "pixelexperience",
+        "omnirom",
+        "protonaosp"
+    };
 
     public ServiceHook(Object target) {
         this.target = target;
     }
 
     public static boolean shouldHide(String name) {
-        if (name == null) return false;
-        String lower = name.toLowerCase(Locale.ROOT);
-        if (lower.equals("profile")) return true;
-        if (lower.contains("lineage")) return true;
-        if (lower.contains("crdroid")) return true;
-        if (lower.contains("aospa")) return true;
-        if (lower.contains("pixelexperience")) return true;
-        if (lower.contains("omnirom")) return true;
-        if (lower.contains("protonaosp")) return true;
+        if (name == null || name.isEmpty()) return false;
+        
+        // Fast exact match for "profile" (case-insensitive)
+        if (name.length() == 7 && name.equalsIgnoreCase("profile")) {
+            return true;
+        }
+
+        // Fast case-insensitive keyword search without allocating a lowercased String
+        final int nameLen = name.length();
+        for (String keyword : HIDDEN_KEYWORDS) {
+            final int kwLen = keyword.length();
+            if (nameLen < kwLen) continue;
+
+            for (int i = 0; i <= nameLen - kwLen; i++) {
+                if (name.regionMatches(true, i, keyword, 0, kwLen)) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
 
@@ -37,7 +56,7 @@ public class ServiceHook implements InvocationHandler {
         String name = method.getName();
 
         // If any parameter is a service name that should be hidden, return null immediately
-        if (args != null) {
+        if (args != null && args.length > 0) {
             for (Object arg : args) {
                 if (arg instanceof String && shouldHide((String) arg)) {
                     return null;
@@ -61,9 +80,9 @@ public class ServiceHook implements InvocationHandler {
         return method.invoke(target, args);
     }
 
-    public static class FilteredCache<K, V> extends HashMap<K, V> {
+    public static class FilteredCache<K, V> extends ConcurrentHashMap<K, V> {
         public FilteredCache() {
-            super();
+            super(32);
         }
 
         private boolean shouldHideKey(Object key) {
@@ -74,6 +93,12 @@ public class ServiceHook implements InvocationHandler {
         public V get(Object key) {
             if (shouldHideKey(key)) return null;
             return super.get(key);
+        }
+
+        @Override
+        public V getOrDefault(Object key, V defaultValue) {
+            if (shouldHideKey(key)) return defaultValue;
+            return super.getOrDefault(key, defaultValue);
         }
 
         @Override
@@ -89,10 +114,19 @@ public class ServiceHook implements InvocationHandler {
         }
 
         @Override
+        public V putIfAbsent(K key, V value) {
+            if (shouldHideKey(key)) return null;
+            return super.putIfAbsent(key, value);
+        }
+
+        @Override
         public void putAll(Map<? extends K, ? extends V> m) {
-            if (m == null) return;
+            if (m == null || m.isEmpty()) return;
             for (Map.Entry<? extends K, ? extends V> entry : m.entrySet()) {
-                put(entry.getKey(), entry.getValue());
+                K key = entry.getKey();
+                if (!shouldHideKey(key)) {
+                    super.put(key, entry.getValue());
+                }
             }
         }
     }
