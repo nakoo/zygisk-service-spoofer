@@ -10,12 +10,14 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 public class ServiceHook implements InvocationHandler {
     private final Object target;
 
-    private static final String[] HIDDEN_KEYWORDS = {
-        "profile",
+    // Substring patterns for custom ROM services
+    private static final String[] HIDDEN_SUBSTRING_PATTERNS = {
         "lineage",
         "crdroid",
         "aospa",
@@ -30,20 +32,20 @@ public class ServiceHook implements InvocationHandler {
 
     public static boolean shouldHide(String name) {
         if (name == null || name.isEmpty()) return false;
-        
-        // Fast exact match for "profile" (case-insensitive)
+
+        // Exact match for "profile" (preserves AOSP "crossprofileapps")
         if (name.length() == 7 && name.equalsIgnoreCase("profile")) {
             return true;
         }
 
-        // Fast case-insensitive keyword search without allocating a lowercased String
+        // Fast case-insensitive substring search without heap allocations
         final int nameLen = name.length();
-        for (String keyword : HIDDEN_KEYWORDS) {
-            final int kwLen = keyword.length();
-            if (nameLen < kwLen) continue;
+        for (String pattern : HIDDEN_SUBSTRING_PATTERNS) {
+            final int patLen = pattern.length();
+            if (nameLen < patLen) continue;
 
-            for (int i = 0; i <= nameLen - kwLen; i++) {
-                if (name.regionMatches(true, i, keyword, 0, kwLen)) {
+            for (int i = 0; i <= nameLen - patLen; i++) {
+                if (name.regionMatches(true, i, pattern, 0, patLen)) {
                     return true;
                 }
             }
@@ -129,6 +131,42 @@ public class ServiceHook implements InvocationHandler {
                 }
             }
         }
+
+        @Override
+        public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+            if (shouldHideKey(key)) return null;
+            return super.computeIfAbsent(key, mappingFunction);
+        }
+
+        @Override
+        public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+            if (shouldHideKey(key)) return null;
+            return super.computeIfPresent(key, remappingFunction);
+        }
+
+        @Override
+        public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+            if (shouldHideKey(key)) return null;
+            return super.compute(key, remappingFunction);
+        }
+
+        @Override
+        public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+            if (shouldHideKey(key)) return null;
+            return super.merge(key, value, remappingFunction);
+        }
+
+        @Override
+        public V replace(K key, V value) {
+            if (shouldHideKey(key)) return null;
+            return super.replace(key, value);
+        }
+
+        @Override
+        public boolean replace(K key, V oldValue, V newValue) {
+            if (shouldHideKey(key)) return false;
+            return super.replace(key, oldValue, newValue);
+        }
     }
 
     public static void install() {
@@ -168,7 +206,7 @@ public class ServiceHook implements InvocationHandler {
                 }
             }
 
-            // 2. Overwrite the final static field using Unsafe so any future putAll/initServiceCache drops "profile"
+            // 2. Overwrite the final static field using Unsafe so future entries are filtered
             FilteredCache<String, IBinder> newCache = new FilteredCache<>();
             if (cacheObj instanceof Map) {
                 Map<?, ?> oldMap = (Map<?, ?>) cacheObj;

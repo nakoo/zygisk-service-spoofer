@@ -101,6 +101,8 @@ public:
             return;
         }
 
+        if (!args->nice_name) return;
+
         const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
         if (process) {
             if (strstr(process, "_zygote") == nullptr &&
