@@ -1,0 +1,6 @@
+id=zygisk_service_spoofer
+name=Zygisk Lineage Service Spoofer
+version=v1.0.0
+versionCode=100
+author=nakoo
+description=Hides LineageOS and custom ROM services from target apps.

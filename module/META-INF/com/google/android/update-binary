@@ -1,0 +1,20 @@
+#!/sbin/sh
+OUTFD=$2
+ZIPFILE=$3
+
+ui_print() {
+  echo -e "ui_print $1\nui_print" > /proc/self/fd/$OUTFD
+}
+
+ui_print "************************************"
+ui_print "* Zygisk Lineage Service Spoofer   *"
+ui_print "************************************"
+
+MODPATH="/data/adb/modules/zygisk_service_spoofer"
+mkdir -p "$MODPATH/zygisk"
+
+unzip -o "$ZIPFILE" "module.prop" -d "$MODPATH" >&2
+unzip -o "$ZIPFILE" "zygisk/*" -d "$MODPATH" >&2
+
+ui_print "- Successfully installed!"
+exit 0

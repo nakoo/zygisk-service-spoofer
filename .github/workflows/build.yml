@@ -1,0 +1,167 @@
+name: Build Zygisk Service Spoofer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
+      - name: Download Zygisk Header
+        run: |
+          mkdir -p jni
+          curl -fSL -o jni/zygisk.hpp https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
+
+      - name: Build DEX Header
+        run: |
+          mkdir -p java_src/com/android/internal/util
+          # Write ServiceHook.java
+          cat << 'EOF' > java_src/com/android/internal/util/ServiceHook.java
+          package com.android.internal.util;
+
+          import android.os.IBinder;
+          import java.lang.reflect.Field;
+          import java.lang.reflect.InvocationHandler;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Proxy;
+          import java.util.ArrayList;
+          import java.util.Iterator;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public class ServiceHook implements InvocationHandler {
+              private final Object target;
+
+              public ServiceHook(Object target) {
+                  this.target = target;
+              }
+
+              private static boolean shouldHide(String name) {
+                  if (name == null) return false;
+                  String lower = name.toLowerCase(Locale.ROOT);
+                  if (lower.equals("profile")) return true;
+                  if (lower.contains("lineage")) return true;
+                  if (lower.contains("crdroid")) return true;
+                  if (lower.contains("aospa")) return true;
+                  if (lower.contains("pixelexperience")) return true;
+                  if (lower.contains("omnirom")) return true;
+                  if (lower.contains("protonaosp")) return true;
+                  return false;
+              }
+
+              @Override
+              public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                  String name = method.getName();
+                  if ("getService".equals(name) || "checkService".equals(name)) {
+                      if (args != null && args.length > 0 && args[0] instanceof String) {
+                          if (shouldHide((String) args[0])) {
+                              return null;
+                          }
+                      }
+                  } else if ("listServices".equals(name)) {
+                      Object res = method.invoke(target, args);
+                      if (res instanceof String[]) {
+                          String[] list = (String[]) res;
+                          List<String> filtered = new ArrayList<>(list.length);
+                          for (String s : list) {
+                              if (!shouldHide(s)) {
+                                  filtered.add(s);
+                              }
+                          }
+                          return filtered.toArray(new String[0]);
+                      }
+                  }
+                  return method.invoke(target, args);
+              }
+
+              public static void install() {
+                  try {
+                      Class<?> smClass = Class.forName("android.os.ServiceManager");
+                      Method getSmMethod = smClass.getDeclaredMethod("getIServiceManager");
+                      getSmMethod.setAccessible(true);
+                      Object orig = getSmMethod.invoke(null);
+                      if (orig == null) return;
+
+                      Class<?> ismClass = Class.forName("android.os.IServiceManager");
+                      Object proxy = Proxy.newProxyInstance(
+                          ismClass.getClassLoader(),
+                          new Class<?>[] { ismClass },
+                          new ServiceHook(orig)
+                      );
+
+                      Field ssmField = smClass.getDeclaredField("sServiceManager");
+                      ssmField.setAccessible(true);
+                      ssmField.set(null, proxy);
+
+                      Field sCacheField = smClass.getDeclaredField("sCache");
+                      sCacheField.setAccessible(true);
+                      Object cacheObj = sCacheField.get(null);
+                      if (cacheObj instanceof Map) {
+                          Map<?, ?> cache = (Map<?, ?>) cacheObj;
+                          synchronized (cache) {
+                              Iterator<?> it = cache.keySet().iterator();
+                              while (it.hasNext()) {
+                                  Object key = it.next();
+                                  if (key instanceof String && shouldHide((String) key)) {
+                                      it.remove();
+                                  }
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          EOF
+
+          javac -source 8 -target 8 -cp $ANDROID_SDK_ROOT/platforms/android-34/android.jar java_src/com/android/internal/util/ServiceHook.java
+          $ANDROID_SDK_ROOT/build-tools/34.0.0/d8 java_src/com/android/internal/util/*.class --output .
+          xxd -i classes.dex > jni/dex_bytes.h
+
+      - name: Build arm64-v8a Binary
+        run: |
+          mkdir -p build_arm64 && cd build_arm64
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+          cd ..
+          mkdir -p module/zygisk
+          cp build_arm64/libservice_spoofer.so module/zygisk/arm64-v8a.so
+
+      - name: Build armeabi-v7a Binary
+        run: |
+          mkdir -p build_arm32 && cd build_arm32
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=armeabi-v7a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+          cd ..
+          cp build_arm32/libservice_spoofer.so module/zygisk/armeabi-v7a.so
+
+      - name: Package Magisk / KernelSU Zip
+        run: |
+          cd module
+          chmod 0755 META-INF/com/google/android/update-binary
+          zip -r ../zygisk_service_spoofer.zip ./*
+
+      - name: Upload Flashable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zygisk_service_spoofer
+          path: zygisk_service_spoofer.zip
+          if-no-files-found: error
