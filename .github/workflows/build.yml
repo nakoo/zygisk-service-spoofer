@@ -47,15 +47,14 @@ jobs:
           cd ..
           cp build_arm32/libservice_spoofer.so module/zygisk/armeabi-v7a.so
 
-      - name: Package Magisk / KernelSU Zip
+      - name: Prepare Module Directory
         run: |
-          cd module
-          chmod 0755 META-INF/com/google/android/update-binary
-          zip -r ../zygisk_service_spoofer.zip ./*
+          chmod 0755 module/META-INF/com/google/android/update-binary
 
-      - name: Upload Flashable Artifact
+      - name: Upload Module Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zygisk_service_spoofer
-          path: zygisk_service_spoofer.zip
+          path: module/
           if-no-files-found: error
+          compression-level: 0
