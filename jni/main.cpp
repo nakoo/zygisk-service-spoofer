@@ -425,83 +425,33 @@ static int my_system_property_get(const char *name, char *value) {
     return 0;
 }
 
-struct ElfId {
-    dev_t dev;
-    ino_t inode;
-    bool found;
-};
-
-static ElfId find_libc_id() {
-    ElfId result{0, 0, false};
-
-    FILE *fp = fopen("/proc/self/maps", "re");
-    if (fp == nullptr) {
-        return result;
-    }
-
-    char line[1024];
-
-    while (fgets(line, sizeof(line), fp) != nullptr) {
-        if (strstr(line, "/libc.so") == nullptr) {
-            continue;
-        }
-
-        char addr[64];
-        char perms[8];
-        char offset[32];
-        char dev[32];
-        unsigned long inode = 0;
-
-        int parsed = sscanf(line, "%63s %7s %31s %31s %lu", addr, perms, offset, dev, &inode);
-        if (parsed < 5) {
-            continue;
-        }
-
-        unsigned long major_num = 0;
-        unsigned long minor_num = 0;
-
-        if (sscanf(dev, "%lx:%lx", &major_num, &minor_num) != 2) {
-            continue;
-        }
-
-        result.dev = makedev(major_num, minor_num);
-        result.inode = static_cast<ino_t>(inode);
-        result.found = true;
-        break;
-    }
-
-    fclose(fp);
-    return result;
-}
-
 static void install_native_hooks(Api *api) {
     static bool installed = false;
     if (installed || api == nullptr) return;
     installed = true;
 
-    ElfId libc = find_libc_id();
-    if (!libc.found) {
-        LOGE("native hooks: unable to find libc dev/inode");
-        return;
-    }
+    // Use 0, 0 to hook the symbols in ALL currently loaded ELFs in the process.
+    // libc.so exports these functions, so they are not in its own PLT.
+    dev_t dev = 0;
+    ino_t inode = 0;
 
-    api->pltHookRegister(libc.dev, libc.inode, "openat",
+    api->pltHookRegister(dev, inode, "openat",
                          reinterpret_cast<void *>(my_openat),
                          reinterpret_cast<void **>(&orig_openat));
 
-    api->pltHookRegister(libc.dev, libc.inode, "__openat_2",
+    api->pltHookRegister(dev, inode, "__openat_2",
                          reinterpret_cast<void *>(my_openat_2),
                          reinterpret_cast<void **>(&orig_openat_2));
 
-    api->pltHookRegister(libc.dev, libc.inode, "open",
+    api->pltHookRegister(dev, inode, "open",
                          reinterpret_cast<void *>(my_open),
                          reinterpret_cast<void **>(&orig_open));
 
-    api->pltHookRegister(libc.dev, libc.inode, "__open_2",
+    api->pltHookRegister(dev, inode, "__open_2",
                          reinterpret_cast<void *>(my_open_2),
                          reinterpret_cast<void **>(&orig_open_2));
 
-    api->pltHookRegister(libc.dev, libc.inode, "__system_property_get",
+    api->pltHookRegister(dev, inode, "__system_property_get",
                          reinterpret_cast<void *>(my_system_property_get),
                          reinterpret_cast<void **>(&orig_prop_get));
 
